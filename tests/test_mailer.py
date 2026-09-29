@@ -52,6 +52,18 @@ class GuardTest(unittest.TestCase):
             with self.assertRaises(CrmWriteForbidden):
                 check_method_allowed("crm.activity.add", {"fields": {**ok, **bad}})
 
+    def test_activity_to_existing_company_only(self):
+        ok = {"TYPE_ID": 4, "DIRECTION": 2, "OWNER_TYPE_ID": 2, "OWNER_ID": 5,
+              "COMMUNICATIONS": [{"VALUE": "info@b.ru", "ENTITY_ID": 9, "ENTITY_TYPE_ID": 4}]}
+        check_method_allowed("crm.activity.add", {"fields": ok})
+        for comm in ({"VALUE": "info@b.ru", "ENTITY_TYPE_ID": 4},                   # компания без ID
+                     {"VALUE": "info@b.ru", "ENTITY_ID": 9, "ENTITY_TYPE_ID": 1}):  # лид
+            with self.assertRaises(CrmWriteForbidden):
+                check_method_allowed("crm.activity.add", {"fields": {**ok, "COMMUNICATIONS": [comm]}})
+        for m in ("crm.company.update", "crm.company.add", "crm.company.delete"):
+            with self.assertRaises(CrmWriteForbidden):
+                check_method_allowed(m, {"id": 9, "fields": {"TITLE": "x"}})
+
     def test_client_refuses_before_http(self):
         fb = FakeBitrix()
         with self.assertRaises(CrmWriteForbidden):
@@ -178,6 +190,38 @@ class SendTest(unittest.TestCase):
         pv2 = camp_mod.preview(client, st, settings(), campaign(), progress=lambda s: None)
         self.assertEqual(pv2.stats["already_sent"], 73)
         self.assertEqual(pv2.stats["to_send"], 0)
+
+    def test_company_fallback_for_deals_without_contact(self):
+        fb = cold_portal()
+        fb.companies[501] = {"ID": "501", "TITLE": "Ромашка", "EMAIL": [{"VALUE": "info@romashka.ru", "VALUE_TYPE": "WORK"}]}
+        fb.companies[502] = {"ID": "502", "TITLE": "Без почты", "EMAIL": []}
+        fb.deals[0]["COMPANY_ID"] = "501"
+        fb.deals[1]["COMPANY_ID"] = "502"
+        client, st = make(fb), Storage(":memory:")
+
+        off = camp_mod.preview(client, st, settings(), campaign(), progress=lambda s: None)
+        self.assertEqual(off.stats["to_send"], 73)
+        self.assertNotIn("crm.company.list", fb.calls)
+
+        pv = camp_mod.preview(client, st, settings(), campaign(key="cold-2", company_fallback=True),
+                              progress=lambda s: None)
+        self.assertEqual(pv.stats["to_send"], 74)
+        self.assertEqual(pv.stats["via_company"], 1)
+        rows = {r["deal_id"]: r for r in st.recipients(pv.campaign_id)}
+        self.assertEqual((rows[1]["status"], rows[1]["company_id"], rows[1]["email"]),
+                         ("queued", 501, "info@romashka.ru"))
+        self.assertEqual(rows[2]["skip_reason"], "у сделки нет контакта, у компании нет email")
+        self.assertEqual(rows[3]["skip_reason"], "у сделки нет связанного контакта")
+
+        sender = BitrixEmailSender(client, "sales@example.com")
+        counts = camp_mod.send(st, pv.campaign_id, sender, confirmed=True, rate_per_minute=0,
+                               reports_dir="/tmp/bitrix-mailer-tests", progress=lambda s: None)
+        self.assertEqual(counts["sent"], 74)
+        a = next(a for a in fb.activities.values() if a["OWNER_ID"] == "1")
+        self.assertEqual(a["COMMUNICATIONS"][0]["ENTITY_TYPE_ID"], 4)
+        self.assertEqual(a["COMMUNICATIONS"][0]["ENTITY_ID"], 501)
+        self.assertTrue(st.recipients(pv.campaign_id, "sent")[0]["timeline_verified"])
+        self.assertTrue(all(r["timeline_verified"] for r in st.recipients(pv.campaign_id, "sent")))
 
     def test_interrupted_send_not_repeated(self):
         st = Storage(":memory:")

@@ -23,11 +23,13 @@ CONTACT_MODES = {
 
 DEAL_SELECT = ["ID", "TITLE", "CATEGORY_ID", "STAGE_ID", "ASSIGNED_BY_ID", "CONTACT_ID", "COMPANY_ID",
                "OPPORTUNITY", "CURRENCY_ID", "DATE_CREATE"]
+COMPANY_SELECT = ["ID", "TITLE", "EMAIL"]
 CONTACT_SELECT = ["ID", "NAME", "LAST_NAME", "SECOND_NAME", "HONORIFIC", "POST", "COMPANY_ID", "EMAIL"]
 
 REASON_NO_CONTACT = "у сделки нет связанного контакта"
 REASON_CONTACT_MISSING = "контакт не найден (удалён или нет доступа)"
 REASON_NO_EMAIL = "у контакта нет email"
+REASON_COMPANY_NO_EMAIL = "у сделки нет контакта, у компании нет email"
 REASON_ALREADY = "уже получал это письмо"
 REASON_DUPLICATE = "email уже в очереди по другой сделке"
 
@@ -37,6 +39,7 @@ class Options:
     contact_mode: str = "primary"
     check_dns: bool = False
     dedupe_email: bool = True
+    company_fallback: bool = False  # сделка без контакта → email её компании
     campaign_key: str = ""
     bitrix_history_subject: str = ""  # искать прошлые письма в CRM по части темы
     extra_deal_fields: list[str] = field(default_factory=list)
@@ -123,6 +126,18 @@ def collect(
             contacts[str(c["ID"])] = c
     progress(f"Загружено контактов: {len(contacts)}")
 
+    # 3а. Компании сделок без контакта (если включено company_fallback)
+    companies: dict[str, dict] = {}
+    if opts.company_fallback:
+        co_ids = sorted({str(d["COMPANY_ID"]) for d in deals if not links[str(d["ID"])]
+                         and d.get("COMPANY_ID") and str(d["COMPANY_ID"]) != "0"}, key=int)
+        for i in range(0, len(co_ids), 50):
+            for co in client.list_all("crm.company.list", {"filter": {"@ID": co_ids[i : i + 50]},
+                                                           "select": COMPANY_SELECT}):
+                companies[str(co["ID"])] = co
+        if co_ids:
+            progress(f"Загружено компаний (сделки без контакта): {len(companies)}")
+
     # 4. История отправок в самом Битрикс24 (необязательно)
     crm_history = _bitrix_history(client, opts.bitrix_history_subject) if opts.bitrix_history_subject else {}
 
@@ -131,29 +146,41 @@ def collect(
     queued_emails: dict[str, str] = {}
     s = dict(deals_found=total if total is not None else len(deals), deals_loaded=len(deals),
              deals_with_contacts=0, deals_without_contacts=0, deals_with_valid_email=0, deals_without_email=0,
-             deals_to_send=0, recipients_checked=0, no_valid_email=0, already_sent=0, duplicates=0, to_send=0)
+             deals_to_send=0, via_company=0, recipients_checked=0, no_valid_email=0, already_sent=0, duplicates=0, to_send=0)
     for d in deals:
         did = str(d["ID"])
         items = links[did]
         base = {"deal_id": int(did), "deal_title": d.get("TITLE")}
-        if not items:
+        if items:
+            s["deals_with_contacts"] += 1
+            chosen = items[:1] if opts.contact_mode == "primary" else items
+        else:
             s["deals_without_contacts"] += 1
-            rows.append({**base, "status": "skipped", "skip_reason": REASON_NO_CONTACT})
-            continue
-        s["deals_with_contacts"] += 1
-        chosen = items[:1] if opts.contact_mode == "primary" else items
+            co = companies.get(str(d.get("COMPANY_ID") or ""))
+            if co is None:
+                rows.append({**base, "status": "skipped", "skip_reason": REASON_NO_CONTACT})
+                continue
+            chosen = [{"COMPANY": co}]
         deal_has_valid = deal_queued = False
         for link in chosen:
-            cid = str(link["CONTACT_ID"])
-            c = contacts.get(cid)
-            row = {**base, "contact_id": int(cid), "is_primary": link.get("IS_PRIMARY") == "Y"}
             s["recipients_checked"] += 1
-            if c is None:
-                s["no_valid_email"] += 1
-                rows.append({**row, "status": "skipped", "skip_reason": REASON_CONTACT_MISSING})
-                continue
-            row["contact_name"] = contact_name(c)
-            email, err = pick_email(c, opts.check_dns)
+            if "COMPANY" in link:
+                c = link["COMPANY"]
+                row = {**base, "company_id": int(c["ID"]), "contact_name": c.get("TITLE") or ""}
+                email, err = pick_email(c, opts.check_dns)
+                err = REASON_COMPANY_NO_EMAIL if err == REASON_NO_EMAIL else err
+                ctx = {"deal": d, "contact": {}, "company": c}
+            else:
+                cid = str(link["CONTACT_ID"])
+                c = contacts.get(cid)
+                row = {**base, "contact_id": int(cid), "is_primary": link.get("IS_PRIMARY") == "Y"}
+                if c is None:
+                    s["no_valid_email"] += 1
+                    rows.append({**row, "status": "skipped", "skip_reason": REASON_CONTACT_MISSING})
+                    continue
+                row["contact_name"] = contact_name(c)
+                email, err = pick_email(c, opts.check_dns)
+                ctx = {"deal": d, "contact": c}
             if email is None:
                 s["no_valid_email"] += 1
                 reason = err if opts.contact_mode != "valid_only" else f"исключён (нет валидного email): {err}"
@@ -161,7 +188,7 @@ def collect(
                 continue
             deal_has_valid = True
             row["email"] = email
-            row["context"] = {"deal": d, "contact": c}
+            row["context"] = ctx
             prev = storage.already_sent(opts.campaign_key, email) if opts.campaign_key else None
             if prev is not None or email in crm_history:
                 s["already_sent"] += 1
@@ -176,6 +203,7 @@ def collect(
             queued_emails[email] = did
             deal_queued = True
             s["to_send"] += 1
+            s["via_company"] += "company_id" in row
             rows.append({**row, "status": "queued"})
         if deal_has_valid:
             s["deals_with_valid_email"] += 1

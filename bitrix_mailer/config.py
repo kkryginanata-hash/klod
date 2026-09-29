@@ -39,6 +39,7 @@ class Campaign:
     filter: dict = field(default_factory=dict)
     raw_filter: dict = field(default_factory=dict)
     dedupe_email: bool = True
+    company_fallback: bool = False  # сделка без контакта → email компании сделки
     bitrix_history_subject: str = ""
     after_send: dict = field(default_factory=dict)  # изменить сделку после отправки: {"Стадия": "..."}
 
@@ -100,6 +101,7 @@ def load_campaign(path: str | Path) -> Campaign:
         filter=flt,
         raw_filter=raw,
         dedupe_email=bool(data.get("dedupe_email", True)),
+        company_fallback=bool(data.get("company_fallback", False)),
         bitrix_history_subject=history.get("bitrix_subject_contains", ""),
         after_send=dict(data.get("after_send", {})),
     )

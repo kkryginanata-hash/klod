@@ -7,6 +7,7 @@ template = "../templates/newyear-top-2026.html"
 
 contact_mode = "primary"
 dedupe_email = true
+company_fallback = true   # Yamaguchi и krygina.com — без контакта, пишем на email компании
 
 [filter]
 "Воронка" = "Холодная воронка"

@@ -63,6 +63,7 @@ def preview(
         contact_mode=mode,
         check_dns=settings.check_dns,
         dedupe_email=camp.dedupe_email,
+        company_fallback=camp.company_fallback,
         campaign_key=camp.key,
         bitrix_history_subject=camp.bitrix_history_subject,
         extra_deal_fields=sorted({f for e, f in fields_used if e == "deal"} | set(after_codes)),
@@ -108,7 +109,8 @@ def format_preview(storage: Storage, cid: int) -> str:
               f"Найдено по фильтру:     {s['deals_found']} сделок" + (
                   f" (загружено {s['deals_loaded']})" if s["deals_found"] != s["deals_loaded"] else ""),
               f"С контактами:           {s['deals_with_contacts']}",
-              f"Без контакта:           {s['deals_without_contacts']}",
+              f"Без контакта:           {s['deals_without_contacts']}" + (
+                  f" (из них на email компании: {s['via_company']})" if s.get("via_company") else ""),
               f"С валидным email:       {s['deals_with_valid_email']}",
               f"Без валидного email:    {s['deals_without_email']}",
               f"Уже получали письмо:    {s['already_sent']}"]
@@ -137,7 +139,7 @@ def format_preview(storage: Storage, cid: int) -> str:
 def export_csv(storage: Storage, cid: int, reports_dir: str) -> Path:
     path = Path(reports_dir) / f"campaign-{cid}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
-    cols = ["deal_id", "deal_title", "contact_id", "contact_name", "is_primary", "email", "status",
+    cols = ["deal_id", "deal_title", "contact_id", "contact_name", "company_id", "is_primary", "email", "status",
             "skip_reason", "activity_id", "timeline_verified", "error", "sent_at"]
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh, delimiter=";")
@@ -206,6 +208,7 @@ def send(
             deal = ctx.get("deal") or {}
             msg = Message(
                 deal_id=r["deal_id"], contact_id=r["contact_id"], contact_name=r["contact_name"] or "",
+                company_id=r["company_id"],
                 email=r["email"],
                 subject=template.render(c["subject"], ctx, escape=False),
                 html=template.render(c["body_html"], ctx, escape=True),
@@ -270,7 +273,9 @@ def format_report(storage: Storage, cid: int) -> str:
     bad = [r for r in rows if r["status"] in ("failed", "unknown") or (r["status"] == "sent" and not r["timeline_verified"])]
     if bad:
         lines += ["", "Требуют внимания:"]
-        lines += [f"  сделка #{r['deal_id']} контакт #{r['contact_id']} {r['email']}: {r['status']} — {r['error']}"
+        lines += [f"  сделка #{r['deal_id']} "
+                  f"{'контакт #' + str(r['contact_id']) if r['contact_id'] else 'компания #' + str(r['company_id'])} "
+                  f"{r['email']}: {r['status']} — {r['error']}"
                   for r in bad[:50]]
         if len(bad) > 50:
             lines.append(f"  … и ещё {len(bad) - 50} (см. CSV)")
