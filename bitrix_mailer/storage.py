@@ -126,3 +126,12 @@ class Storage:
             "ORDER BY r.sent_at DESC LIMIT 1",
             (key, email, exclude_recipient or -1),
         ).fetchone()
+
+    def sent_on_day(self, day: dt.date | None = None) -> int:
+        """Сколько писем отправлено за календарный день (по всем кампаниям) — для дневного лимита."""
+        day = day or dt.date.today()
+        start = dt.datetime.combine(day, dt.time()).isoformat(timespec="seconds")
+        end = dt.datetime.combine(day + dt.timedelta(days=1), dt.time()).isoformat(timespec="seconds")
+        row = self.db.execute("SELECT COUNT(*) n FROM recipients WHERE status='sent' AND sent_at>=? AND sent_at<?",
+                              (start, end)).fetchone()
+        return int(row["n"])

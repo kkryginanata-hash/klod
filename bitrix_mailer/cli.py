@@ -99,7 +99,8 @@ def cmd_send(args, settings, client, storage) -> int:
 def _run_send(settings, client, storage, cid, args) -> int:
     sender = make_sender(settings, client)
     camp_mod.send(storage, cid, sender, confirmed=True, rate_per_minute=settings.rate_per_minute,
-                  limit=getattr(args, "limit", None), retry_failed=getattr(args, "retry_failed", False),
+                  limit=getattr(args, "limit", None), max_per_day=settings.max_per_day,
+                  retry_failed=getattr(args, "retry_failed", False),
                   reports_dir=settings.reports_dir)
     print()
     print(camp_mod.format_report(storage, cid))

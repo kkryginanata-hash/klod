@@ -190,6 +190,38 @@ class SendTest(unittest.TestCase):
         self.assertEqual(len(sender.sent), 72)
         self.assertEqual(st.counts(pv.campaign_id).get("unknown"), 1)
 
+    def test_daily_limit_across_runs_and_campaigns(self):
+        st = Storage(":memory:")
+        pv = camp_mod.preview(make(cold_portal()), st, settings(), campaign(), progress=lambda s: None)
+        sender = DryRunSender()
+        kw = dict(confirmed=True, rate_per_minute=0, reports_dir="/tmp/bitrix-mailer-tests", progress=lambda s: None)
+        camp_mod.send(st, pv.campaign_id, sender, max_per_day=30, limit=20, **kw)
+        self.assertEqual(len(sender.sent), 20)
+        # второй запуск в тот же день: осталось только 10 из 30
+        camp_mod.send(st, pv.campaign_id, sender, max_per_day=30, **kw)
+        self.assertEqual(len(sender.sent), 30)
+        self.assertEqual(st.counts(pv.campaign_id)["queued"], 43)
+        self.assertEqual(st.campaign(pv.campaign_id)["status"], "sending")
+        # лимит общий для всех кампаний: другая кампания сегодня уже ничего не отправит
+        pv2 = camp_mod.preview(make(cold_portal()), st, settings(), campaign(key="cold-2"), progress=lambda s: None)
+        camp_mod.send(st, pv2.campaign_id, sender, max_per_day=30, **kw)
+        self.assertEqual(len(sender.sent), 30)
+        self.assertEqual(st.sent_on_day(), 30)
+        self.assertEqual(st.sent_on_day(dt.date.today() + dt.timedelta(days=1)), 0)
+
+    def test_max_per_day_setting(self):
+        import os, tempfile
+        from bitrix_mailer.config import ConfigError, load_settings
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "config.toml")
+            open(cfg, "w").write('[bitrix]\nwebhook_url = "x"\n')
+            self.assertEqual(load_settings(cfg).max_per_day, 100)
+            open(cfg, "w").write('[bitrix]\nwebhook_url = "x"\n[send]\nmax_per_day = 0\n')
+            self.assertEqual(load_settings(cfg).max_per_day, 0)
+            open(cfg, "w").write('[bitrix]\nwebhook_url = "x"\n[send]\nmax_per_day = -5\n')
+            with self.assertRaises(ConfigError):
+                load_settings(cfg)
+
 
 class HelpersTest(unittest.TestCase):
     def test_email_validation(self):

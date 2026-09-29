@@ -137,6 +137,7 @@ def send(
     confirmed: bool,
     rate_per_minute: float = 30.0,
     limit: int | None = None,
+    max_per_day: int | None = None,
     retry_failed: bool = False,
     reports_dir: str = "reports",
     progress: Callable[[str], None] = print,
@@ -165,10 +166,21 @@ def send(
     queue = storage.recipients(cid, "queued")
     if limit is not None:
         queue = queue[:limit]
+    # Дневной лимит считается по всем кампаниям: ограничение ставит почтовый ящик, а не кампания.
+    day_left: int | None = None
+    if max_per_day:
+        sent_today = storage.sent_on_day()
+        day_left = max(max_per_day - sent_today, 0)
+        progress(f"Дневной лимит: сегодня уже отправлено {sent_today} из {max_per_day}, осталось {day_left}")
     interval = 60.0 / rate_per_minute if rate_per_minute > 0 else 0.0
     progress(f"В очереди: {len(queue)} писем, скорость до {rate_per_minute:g}/мин")
+    sent_now = 0
     try:
         for i, r in enumerate(queue, 1):
+            if day_left is not None and sent_now >= day_left:
+                progress(f"⏸ Достигнут дневной лимит ({max_per_day} писем). Остальные остаются в очереди — "
+                         f"запустите send {cid} завтра, продолжится с места остановки.")
+                break
             prev = storage.already_sent(c["key"], r["email"], exclude_recipient=r["id"])
             if prev is not None:
                 storage.update_recipient(r["id"], status="skipped",
@@ -184,6 +196,7 @@ def send(
                 responsible_id=int(deal["ASSIGNED_BY_ID"]) if deal.get("ASSIGNED_BY_ID") else None,
             )
             storage.update_recipient(r["id"], status="sending", attempts=r["attempts"] + 1)
+            sent_now += 1  # считаем попытку: письмо могло уйти, даже если вернулась ошибка
             try:
                 res = sender.send(msg)
             except CrmWriteForbidden:

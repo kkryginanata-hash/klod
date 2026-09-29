@@ -25,6 +25,7 @@ class Settings:
     reply_to: str = ""
     responsible_id: int | None = None
     rate_per_minute: float = 30.0
+    max_per_day: int = 100          # 0 — без дневного лимита
     check_dns: bool = False
     smtp: dict = field(default_factory=dict)
 
@@ -40,6 +41,16 @@ class Campaign:
     raw_filter: dict = field(default_factory=dict)
     dedupe_email: bool = True
     bitrix_history_subject: str = ""
+
+
+def _max_per_day(value) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ConfigError("[send].max_per_day: целое число писем в сутки (0 — без лимита)") from None
+    if n < 0:
+        raise ConfigError("[send].max_per_day не может быть отрицательным")
+    return n
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -67,6 +78,7 @@ def load_settings(path: str | Path) -> Settings:
         reply_to=snd.get("reply_to", ""),
         responsible_id=int(snd["responsible_id"]) if snd.get("responsible_id") else None,
         rate_per_minute=float(snd.get("rate_per_minute", 30)),
+        max_per_day=_max_per_day(snd.get("max_per_day", 100)),
         check_dns=bool(snd.get("check_dns", False)),
         smtp=smtp,
     )
