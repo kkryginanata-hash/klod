@@ -1,0 +1,17 @@
+# Холодная воронка → Свободные, сделки Натальи Крыгиной: предложение чек-листа для тендера.
+name = "Тендер по CRM и email — чек-лист (Крыгина)"
+key = "tender-checklist-2026"
+
+subject = "Тендер по CRM и email маркетингу"
+template = "../templates/tender-checklist.html"
+
+contact_mode = "primary"
+dedupe_email = true
+
+[filter]
+"Воронка" = "Холодная воронка"
+"Стадия" = "Свободные"
+"Ответственный" = "natalya.krygina@crmgroup.ru"
+
+[history]
+bitrix_subject_contains = "Тендер по CRM и email маркетингу"
