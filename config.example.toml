@@ -1,0 +1,28 @@
+# Скопируйте в config.toml. Секреты лучше передавать через переменные окружения:
+#   BITRIX_WEBHOOK_URL — входящий вебхук, SMTP_PASSWORD — пароль SMTP.
+
+[bitrix]
+# Входящий вебхук с правами: crm (чтение + дела), user (чтение списка пользователей).
+# webhook_url = "https://ваш-портал.bitrix24.ru/rest/1/xxxxxxxxxxxx/"
+requests_per_second = 2          # лимит Битрикс24 — 2 запроса/с
+
+[storage]
+path = "data/mailer.sqlite"      # очередь и история отправок
+reports_dir = "reports"          # CSV со списками получателей и отчётами
+
+[send]
+# bitrix — письмо отправляет Битрикс24 из подключённого к CRM ящика, в Timeline
+#          сделки и контакта появляется настоящее исходящее письмо (рекомендуется);
+# smtp   — отправка через свой SMTP + комментарий в Timeline сделки и контакта.
+via = "bitrix"
+from = "Отдел продаж <sales@company.ru>"   # для via=bitrix — ящик, подключённый к CRM
+rate_per_minute = 30             # скорость очереди
+# responsible_id = 1             # ответственный за дело «Письмо»; по умолчанию — ответственный сделки
+check_dns = false                # проверять у домена MX-запись (нужен пакет dnspython)
+
+[smtp]
+# host = "smtp.yandex.ru"
+# port = 465
+# security = "ssl"               # ssl | starttls | none
+# username = "sales@company.ru"
+# log_to_contact = true          # дублировать запись в Timeline контакта
