@@ -18,6 +18,7 @@ from .filters import Condition, FilterResolver, conditions_from_mapping
 from .recipients import CONTACT_MODES, Options, collect
 from .senders import Message
 from .storage import Storage, now
+from . import updates
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,7 @@ def preview(
         raise ValueError(f"contact_mode: {', '.join(CONTACT_MODES)}")
 
     fields_used = template.placeholders(camp.subject, camp.body_html)
+    after_conds = updates.parse_changes(camp.after_send) if camp.after_send else []
     conditions = conditions_from_mapping(camp.filter) + list(extra_conditions or [])
     if not conditions and not camp.raw_filter:
         raise ValueError("фильтр пуст — рассылка по всем сделкам портала запрещена; задайте условия")
@@ -54,6 +56,8 @@ def preview(
     resolved = resolver.resolve(conditions, camp.raw_filter)
     for line in resolved.explained:
         progress(f"  фильтр: {line}")
+    planner = updates.ChangePlanner(resolver)
+    after_codes = planner.codes(after_conds)  # проверка полей до загрузки сделок
 
     opts = Options(
         contact_mode=mode,
@@ -61,7 +65,7 @@ def preview(
         dedupe_email=camp.dedupe_email,
         campaign_key=camp.key,
         bitrix_history_subject=camp.bitrix_history_subject,
-        extra_deal_fields=sorted(f for e, f in fields_used if e == "deal"),
+        extra_deal_fields=sorted({f for e, f in fields_used if e == "deal"} | set(after_codes)),
         extra_contact_fields=sorted(f for e, f in fields_used if e == "contact" and f not in CONTACT_PLACEHOLDER_FIELDS),
     )
     col = collect(client, storage, resolved.bitrix, opts, progress)
@@ -73,6 +77,14 @@ def preview(
     storage.add_recipients(cid, col.rows)
     storage.set_stats(cid, col.stats)
     csv_path = export_csv(storage, cid, settings.reports_dir)
+
+    if after_conds:
+        # Изменения «после отправки» планируются сейчас и показываются в предпросмотре;
+        # применяются только к сделкам, по которым письмо действительно ушло.
+        send_deals = {r["deal_id"] for r in col.rows if r["status"] == "queued"}
+        rows = planner.plan([d for d in col.deals if int(d["ID"]) in send_deals], after_conds)
+        storage.create_update_batch({"set": [str(c) for c in after_conds], "filter": [], "deals_found": None},
+                                    rows, campaign_id=cid)
 
     sample = None
     first = next((r for r in col.rows if r["status"] == "queued"), None)
@@ -109,6 +121,16 @@ def format_preview(storage: Storage, cid: int) -> str:
         skipped[reason] = skipped.get(reason, 0) + 1
     if skipped:
         lines += ["", "Причины исключения:"] + [f"  – {k}: {v}" for k, v in sorted(skipped.items(), key=lambda x: -x[1])]
+    batch = storage.campaign_update_batch(cid)
+    if batch is not None:
+        info = json.loads(batch["info_json"])
+        counts = storage.change_counts(batch["id"])
+        lines += ["", f"После отправки изменить сделки ({', '.join(info['set'])}):",
+                  f"  будет изменено: {counts.get('planned', 0)}, без изменений/нельзя: {counts.get('skipped', 0)}"]
+        examples = storage.deal_changes(batch["id"], "planned")[:3]
+        lines += [f"  например, сделка #{r['deal_id']}: {r['label']}" for r in examples]
+        reasons = {(r["skip_reason"] or "").split(" (")[0] for r in storage.deal_changes(batch["id"], "skipped")}
+        lines += [f"  пропуск: {x}" for x in sorted(reasons)]
     return "\n".join(lines)
 
 
@@ -141,8 +163,14 @@ def send(
     reports_dir: str = "reports",
     progress: Callable[[str], None] = print,
     sleep: Callable[[float], None] = time.sleep,
+    update_client: BitrixClient | None = None,
 ) -> dict:
+    """update_client — клиент с allow_deal_updates=True; нужен, только если в кампании
+    задан [after_send] (изменение сделок после отправки, показанное в предпросмотре)."""
     c = storage.campaign(cid)
+    batch = storage.campaign_update_batch(cid)
+    if batch is not None and update_client is None:
+        raise RuntimeError("в кампании задано изменение сделок после отправки, но клиент для изменений не передан")
     if not confirmed:
         raise NotConfirmed("рассылка не подтверждена")
     if c["status"] in ("done", "cancelled") and not retry_failed:
@@ -199,6 +227,10 @@ def send(
                                          error=None if res.verified else f"Timeline: {res.note}")
                 mark = "✓" if res.verified else "✓ (Timeline не подтверждён)"
                 progress(f"  [{i}/{len(queue)}] {mark} сделка #{r['deal_id']} → {r['email']}")
+                if batch is not None:
+                    for ch in storage.deal_changes(batch["id"], "planned", deal_id=r["deal_id"]):
+                        ok, err = updates.apply_one(update_client, storage, ch)
+                        progress(f"      {'✓' if ok else '✗'} {ch['label'] if ok else 'сделка не изменена: ' + err}")
             if interval and i < len(queue):
                 sleep(interval)
     finally:
@@ -207,6 +239,8 @@ def send(
         counts = storage.counts(cid)
         if not counts.get("queued"):
             storage.set_status(cid, "done")
+        if batch is not None:
+            storage.set_update_status(batch["id"], "applied")
         export_csv(storage, cid, reports_dir)
     return storage.counts(cid)
 
@@ -228,6 +262,11 @@ def format_report(storage: Storage, cid: int) -> str:
         f"Ещё в очереди:             {counts.get('queued', 0)}",
         f"Пропущено:                 {counts.get('skipped', 0)}",
     ]
+    batch = storage.campaign_update_batch(cid)
+    if batch is not None:
+        bc = storage.change_counts(batch["id"])
+        lines.append(f"Сделки изменены после отправки: {bc.get('applied', 0)}, ошибки: {bc.get('failed', 0)}"
+                     f" (журнал изменений #{batch['id']}, откат: update-undo {batch['id']})")
     bad = [r for r in rows if r["status"] in ("failed", "unknown") or (r["status"] == "sent" and not r["timeline_verified"])]
     if bad:
         lines += ["", "Требуют внимания:"]

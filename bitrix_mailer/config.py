@@ -40,6 +40,7 @@ class Campaign:
     raw_filter: dict = field(default_factory=dict)
     dedupe_email: bool = True
     bitrix_history_subject: str = ""
+    after_send: dict = field(default_factory=dict)  # изменить сделку после отправки: {"Стадия": "..."}
 
 
 def load_settings(path: str | Path) -> Settings:
@@ -100,4 +101,5 @@ def load_campaign(path: str | Path) -> Campaign:
         raw_filter=raw,
         dedupe_email=bool(data.get("dedupe_email", True)),
         bitrix_history_subject=history.get("bitrix_subject_contains", ""),
+        after_send=dict(data.get("after_send", {})),
     )

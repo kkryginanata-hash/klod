@@ -4,6 +4,11 @@
     python -m bitrix_mailer preview campaigns/cold.toml      # предпросмотр + подтверждение
     python -m bitrix_mailer send 12                          # отправка кампании #12 (спросит подтверждение)
     python -m bitrix_mailer report 12                        # итоговый отчёт
+
+    # изменение сделок (стадия, ответственный, поля) — тоже с подтверждением
+    python -m bitrix_mailer update -w "Воронка=Холодная" -w "Стадия=Свободные" --set "Стадия=В работе"
+    python -m bitrix_mailer update-apply 3                   # применить план #3 (спросит подтверждение)
+    python -m bitrix_mailer update-undo 3                    # вернуть старые значения
 """
 
 from __future__ import annotations
@@ -17,10 +22,11 @@ from pathlib import Path
 from . import campaign as camp_mod
 from .client import BitrixClient
 from .config import load_campaign, load_settings
-from .filters import FilterResolver, parse_expression
+from .filters import FilterResolver, conditions_from_mapping, parse_expression
 from .senders import BitrixEmailSender, SmtpSender
 from .storage import Storage
 from .template import render
+from . import updates
 
 
 def _ask(prompt: str) -> bool:
@@ -96,11 +102,18 @@ def cmd_send(args, settings, client, storage) -> int:
     return _run_send(settings, client, storage, args.campaign_id, args)
 
 
+def _update_client(settings) -> BitrixClient:
+    """Клиент, которому разрешено менять поля существующих сделок. Создаётся только
+    после подтверждения пользователя (update-apply/update-undo, send с [after_send])."""
+    return BitrixClient(settings.webhook_url, settings.requests_per_second, allow_deal_updates=True)
+
+
 def _run_send(settings, client, storage, cid, args) -> int:
     sender = make_sender(settings, client)
+    upd = _update_client(settings) if storage.campaign_update_batch(cid) is not None else None
     camp_mod.send(storage, cid, sender, confirmed=True, rate_per_minute=settings.rate_per_minute,
                   limit=getattr(args, "limit", None), retry_failed=getattr(args, "retry_failed", False),
-                  reports_dir=settings.reports_dir)
+                  reports_dir=settings.reports_dir, update_client=upd)
     print()
     print(camp_mod.format_report(storage, cid))
     print(f"\nCSV: {camp_mod.export_csv(storage, cid, settings.reports_dir)}")
@@ -136,6 +149,92 @@ def cmd_list(args, settings, client, storage) -> int:
     return 0
 
 
+def cmd_update(args, settings, client, storage) -> int:
+    conds = [parse_expression(w) for w in args.where or []]
+    raw = {}
+    if args.campaign:
+        camp = load_campaign(args.campaign)
+        conds = conditions_from_mapping(camp.filter) + conds
+        raw = camp.raw_filter
+    resolver = FilterResolver(client)
+    resolved = resolver.resolve(conds, raw)
+    if args.deals:
+        ids = [x.strip() for x in args.deals.split(",") if x.strip()]
+        if not all(x.isdigit() for x in ids):
+            raise SystemExit("--deals: номера сделок через запятую, например 12,15,40")
+        resolved.bitrix["@ID"] = ids
+    if not resolved.bitrix:
+        raise SystemExit("укажите, какие сделки менять: -w условия, --campaign файл или --deals номера")
+    changes = updates.parse_changes(args.set or [])
+    planner = updates.ChangePlanner(resolver)
+    total, deals = updates.load_deals(client, resolved.bitrix, planner.codes(changes))
+    rows = planner.plan(deals, changes)
+    info = {"filter": [str(c) for c in conds] + ([f"ID: {args.deals}"] if args.deals else []),
+            "set": [str(c) for c in changes], "deals_found": total if total is not None else len(deals),
+            "bitrix_filter": resolved.bitrix}
+    bid = storage.create_update_batch(info, rows)
+    print(updates.format_plan(storage, bid))
+    n = storage.change_counts(bid).get("planned", 0)
+    if not n:
+        print("\nМенять нечего.")
+        return 0
+    if args.no_prompt:
+        print(f"\nДля применения: python -m bitrix_mailer update-apply {bid}")
+        return 0
+    if _ask(f"\nИзменить {n} сделок? Введите «да»: "):
+        return _apply(settings, storage, bid)
+    print(f"Изменения не внесены. Применить позже: python -m bitrix_mailer update-apply {bid}")
+    return 0
+
+
+def _apply(settings, storage, bid) -> int:
+    updates.apply_batch(_update_client(settings), storage, bid, confirmed=True)
+    print()
+    print(updates.format_result(storage, bid))
+    print(f"\nОткатить: python -m bitrix_mailer update-undo {bid}")
+    return 0
+
+
+def cmd_update_apply(args, settings, client, storage) -> int:
+    b = storage.update_batch(args.batch_id)
+    if b["campaign_id"]:
+        raise SystemExit("это изменение привязано к рассылке и применяется при её отправке (send)")
+    print(updates.format_plan(storage, args.batch_id))
+    n = storage.change_counts(args.batch_id).get("planned", 0)
+    if not n:
+        print("\nМенять нечего.")
+        return 0
+    if not args.yes and not _ask(f"\nИзменить {n} сделок? Введите «да»: "):
+        print("Отменено: нужно подтверждение («да» или флаг --yes).")
+        return 1
+    return _apply(settings, storage, args.batch_id)
+
+
+def cmd_update_undo(args, settings, client, storage) -> int:
+    n = storage.change_counts(args.batch_id).get("applied", 0)
+    print(updates.format_result(storage, args.batch_id))
+    if not n:
+        print("\nОткатывать нечего.")
+        return 0
+    if not args.yes and not _ask(f"\nВернуть старые значения в {n} сделках? Введите «да»: "):
+        print("Отменено: нужно подтверждение («да» или флаг --yes).")
+        return 1
+    updates.undo_batch(_update_client(settings), storage, args.batch_id, confirmed=True)
+    print()
+    print(updates.format_result(storage, args.batch_id))
+    return 0
+
+
+def cmd_updates(args, settings, client, storage) -> int:
+    for b in storage.update_batches():
+        info = json.loads(b["info_json"])
+        c = storage.change_counts(b["id"])
+        src = f"после кампании #{b['campaign_id']}" if b["campaign_id"] else "; ".join(info.get("filter", []))
+        print(f"#{b['id']:<4} {b['created_at']}  {b['status']:<8} {', '.join(info['set'])}  [{src}]  "
+              f"изменено {c.get('applied', 0)}, ждут {c.get('planned', 0)}, откачено {c.get('undone', 0)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bitrix_mailer", description="Рассылка по сделкам Битрикс24 с фильтрами")
     p.add_argument("-c", "--config", default="config.toml")
@@ -162,11 +261,27 @@ def main(argv: list[str] | None = None) -> int:
     pr.add_argument("campaign_id", type=int)
     sub.add_parser("list", help="список кампаний")
 
+    pu = sub.add_parser("update", help="изменить поля сделок по фильтру (с подтверждением)")
+    pu.add_argument("-w", "--where", action="append", help="условие отбора сделок, как в preview")
+    pu.add_argument("--campaign", help="взять фильтр из файла кампании")
+    pu.add_argument("--deals", help="номера сделок через запятую")
+    pu.add_argument("-s", "--set", action="append", required=True,
+                    help="что изменить, напр. --set 'Стадия=В работе' --set 'Ответственный=Пётр Петров'")
+    pu.add_argument("--no-prompt", action="store_true", help="только показать план, не применять")
+    pa = sub.add_parser("update-apply", help="применить план изменений")
+    pa.add_argument("batch_id", type=int)
+    pa.add_argument("--yes", action="store_true")
+    pn = sub.add_parser("update-undo", help="откатить изменения (вернуть старые значения)")
+    pn.add_argument("batch_id", type=int)
+    pn.add_argument("--yes", action="store_true")
+    sub.add_parser("updates", help="журнал изменений сделок")
+
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
     settings = load_settings(args.config)
     client = BitrixClient(settings.webhook_url, settings.requests_per_second)
     storage = Storage(settings.db_path)
     handler = {"fields": cmd_fields, "preview": cmd_preview, "send": cmd_send,
-               "report": cmd_report, "list": cmd_list}[args.cmd]
+               "report": cmd_report, "list": cmd_list, "update": cmd_update,
+               "update-apply": cmd_update_apply, "update-undo": cmd_update_undo, "updates": cmd_updates}[args.cmd]
     return handler(args, settings, client, storage)

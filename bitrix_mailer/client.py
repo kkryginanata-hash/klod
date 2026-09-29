@@ -8,9 +8,14 @@
   привязанное к существующей сделке или контакту;
 * ``crm.timeline.comment.add`` — только комментарий к сделке или контакту.
 
-Создание лидов/сделок/контактов/компаний, смена стадии, воронки и
-ответственного невозможны: методы ``*.add``/``*.update``/``*.delete`` для этих
-сущностей в список не входят.
+Изменение полей существующих сделок (``crm.deal.update``: стадия, ответственный,
+сумма и т.п.) возможно только у клиента, созданного с ``allow_deal_updates=True``.
+Такой клиент создаёт лишь команда изменения сделок — после того как пользователь
+увидел список изменений и подтвердил его.
+
+Ни в каком режиме нельзя: создавать и удалять лиды/сделки/контакты/компании,
+изменять контакты и компании, переносить сделку в другую воронку, менять её
+привязки (контакты, компания) и служебные поля.
 """
 
 from __future__ import annotations
@@ -54,6 +59,12 @@ ENTITY_CONTACT = 3
 ACTIVITY_EMAIL = 4
 DIRECTION_OUTGOING = 2
 
+# Поля сделки, которые нельзя менять даже в режиме изменения сделок
+DEAL_UPDATE_FORBIDDEN_FIELDS = frozenset(
+    {"ID", "CATEGORY_ID", "CONTACT_ID", "CONTACT_IDS", "COMPANY_ID", "LEAD_ID", "QUOTE_ID",
+     "DATE_CREATE", "CREATED_BY_ID", "DATE_MODIFY", "MODIFY_BY_ID"}
+)
+
 RETRY_ERRORS = {"QUERY_LIMIT_EXCEEDED", "OPERATION_TIME_LIMIT", "INTERNAL_SERVER_ERROR"}
 
 
@@ -69,8 +80,8 @@ class CrmWriteForbidden(RuntimeError):
     """Попытка вызвать метод, который может изменить CRM."""
 
 
-def check_method_allowed(method: str, params: dict | None = None) -> None:
-    """Бросает CrmWriteForbidden, если вызов может изменить данные CRM."""
+def check_method_allowed(method: str, params: dict | None = None, allow_deal_updates: bool = False) -> None:
+    """Бросает CrmWriteForbidden, если вызов может изменить CRM сверх разрешённого."""
     params = params or {}
     if method == "batch":
         for key, cmd in (params.get("cmd") or {}).items():
@@ -95,6 +106,18 @@ def check_method_allowed(method: str, params: dict | None = None) -> None:
         f = params.get("fields") or {}
         if str(f.get("ENTITY_TYPE", "")).lower() not in ("deal", "contact") or not int(f.get("ENTITY_ID", 0)):
             raise CrmWriteForbidden("комментарий допускается только к существующей сделке или контакту")
+        return
+    if method == "crm.deal.update":
+        if not allow_deal_updates:
+            raise CrmWriteForbidden("изменение сделок разрешено только командой update после подтверждения")
+        if not str(params.get("id", "")).isdigit() or int(params["id"]) <= 0:
+            raise CrmWriteForbidden("crm.deal.update: нужен ID существующей сделки")
+        fields = params.get("fields") or {}
+        if not fields:
+            raise CrmWriteForbidden("crm.deal.update: пустой набор полей")
+        bad = sorted(set(fields) & DEAL_UPDATE_FORBIDDEN_FIELDS)
+        if bad:
+            raise CrmWriteForbidden(f"crm.deal.update: поля {', '.join(bad)} менять запрещено")
         return
     raise CrmWriteForbidden(f"метод {method} запрещён: ассистент не изменяет CRM")
 
@@ -128,6 +151,7 @@ class BitrixClient:
         timeout: float = 60.0,
         transport: Callable[[str, dict], dict] | None = None,
         sleep: Callable[[float], None] = time.sleep,
+        allow_deal_updates: bool = False,
     ):
         self.base = webhook_url.rstrip("/") + "/"
         self.min_interval = 1.0 / requests_per_second if requests_per_second > 0 else 0.0
@@ -137,6 +161,7 @@ class BitrixClient:
         self._sleep = sleep
         self._last_call = 0.0
         self.calls = 0
+        self.allow_deal_updates = allow_deal_updates
 
     # --- транспорт -------------------------------------------------------
     def _http(self, method: str, params: dict) -> dict:
@@ -166,7 +191,7 @@ class BitrixClient:
 
     def call_raw(self, method: str, params: dict | None = None) -> dict:
         params = params or {}
-        check_method_allowed(method, params)
+        check_method_allowed(method, params, self.allow_deal_updates)
         delay = 1.0
         for attempt in range(self.max_retries + 1):
             self._throttle()

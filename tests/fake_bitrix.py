@@ -112,6 +112,15 @@ class FakeBitrix:
             return {"result": self.fields}
         if method == "user.get":
             return {"result": self.users}
+        if method == "crm.deal.get":
+            d = next((x for x in self.deals if x["ID"] == str(params["id"])), None)
+            return {"result": dict(d)} if d else {"error": "NOT_FOUND", "error_description": "Not found"}
+        if method == "crm.deal.update":
+            d = next((x for x in self.deals if x["ID"] == str(params["id"])), None)
+            if d is None:
+                return {"error": "NOT_FOUND", "error_description": "Not found"}
+            d.update({k: str(v) for k, v in params["fields"].items()})
+            return {"result": True}
         if method == "crm.activity.add":
             aid = len(self.activities) + 1000
             self.activities[aid] = {"ID": str(aid), **{k: str(v) if not isinstance(v, (list, dict)) else v
