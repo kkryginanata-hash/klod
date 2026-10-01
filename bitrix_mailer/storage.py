@@ -40,7 +40,8 @@ CREATE TABLE IF NOT EXISTS recipients (
     error             TEXT,
     attempts          INTEGER NOT NULL DEFAULT 0,
     sent_at           TEXT,
-    read_at           TEXT                -- когда получатель открыл письмо (по данным Битрикс24)
+    read_at           TEXT,               -- когда получатель открыл письмо (по данным Битрикс24)
+    read_status       TEXT                -- read | unread | untracked (Битрикс24 не отслеживает) | NULL
 );
 CREATE INDEX IF NOT EXISTS ix_recipients_campaign ON recipients(campaign_id, status);
 CREATE INDEX IF NOT EXISTS ix_recipients_email ON recipients(email, status);
@@ -81,9 +82,10 @@ class Storage:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(recipients)")}
-        if "read_at" not in cols:  # база, созданная до появления статуса прочтения
-            self.db.execute("ALTER TABLE recipients ADD COLUMN read_at TEXT")
-            self.db.commit()
+        for col in ("read_at", "read_status"):  # база, созданная до появления статуса прочтения
+            if col not in cols:
+                self.db.execute(f"ALTER TABLE recipients ADD COLUMN {col} TEXT")
+        self.db.commit()
 
     # --- кампании ---------------------------------------------------------
     def create_campaign(self, *, key, name, subject, body_html, filter_info, contact_mode, send_via) -> int:

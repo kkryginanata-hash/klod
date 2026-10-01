@@ -138,7 +138,7 @@ def export_csv(storage: Storage, cid: int, reports_dir: str) -> Path:
     path = Path(reports_dir) / f"campaign-{cid}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = ["deal_id", "deal_title", "contact_id", "contact_name", "is_primary", "email", "status",
-            "skip_reason", "activity_id", "timeline_verified", "error", "sent_at", "read_at"]
+            "skip_reason", "activity_id", "timeline_verified", "error", "sent_at", "read_status", "read_at"]
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh, delimiter=";")
         w.writerow(cols)
@@ -147,27 +147,50 @@ def export_csv(storage: Storage, cid: int, reports_dir: str) -> Path:
     return path
 
 
-def refresh_read_status(client: BitrixClient, storage: Storage, cid: int) -> int | None:
-    """Подтянуть из Битрикс24, кто открыл письмо.
+READ_STATUS_TITLES = {"read": "прочитано", "unread": "не прочитано", "untracked": "нет данных"}
 
-    Битрикс24 вставляет в письма, отправленные из CRM, пиксель отслеживания; при
-    открытии письма у дела «E-mail» появляется ``SETTINGS.READ_CONFIRMED`` (время
-    открытия, unix). Только чтение (crm.activity.get), в CRM ничего не меняется.
-    Возвращает число прочитанных писем или None, если для кампании статус недоступен
-    (письма ушли через SMTP — их Битрикс24 не отслеживает).
+
+def read_status_of(activity: dict) -> tuple[str, str | None]:
+    """Статус прочтения письма-дела «E-mail» по данным Битрикс24: (статус, время открытия).
+
+    Битрикс24 вставляет пиксель отслеживания в письма, отправленные из интерфейса
+    CRM (у таких дел есть ``SETTINGS.EMAIL_META``), и при открытии ставит
+    ``SETTINGS.READ_CONFIRMED`` (unix-время). В письма, созданные через REST
+    (crm.activity.add — так отправляет этот инструмент), и в «сжатые» дела пиксель
+    не попадает: у них отсутствие отметки ничего не значит — это «нет данных»,
+    а не «не прочитано».
     """
+    settings = activity.get("SETTINGS") or {}
+    if not isinstance(settings, dict):
+        settings = {}
+    ts = settings.get("READ_CONFIRMED")
+    if ts:
+        return "read", dt.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
+    if "EMAIL_META" in settings:
+        return "unread", None
+    return "untracked", None
+
+
+def refresh_read_status(client: BitrixClient, storage: Storage, cid: int) -> dict[str, int] | None:
+    """Подтянуть из Битрикс24 статус прочтения отправленных писем (только чтение,
+    crm.activity.get). Возвращает счётчики статусов или None, если письма ушли через
+    SMTP — их Битрикс24 не отслеживает."""
     if storage.campaign(cid)["send_via"] != "bitrix":
         return None
-    rows = [r for r in storage.recipients(cid, "sent") if r["activity_id"] and not r["read_at"]]
+    rows = [r for r in storage.recipients(cid, "sent") if r["activity_id"] and r["read_status"] != "read"]
     if rows:
         results, _errors = client.batch({str(r["id"]): ("crm.activity.get", {"id": r["activity_id"]}) for r in rows})
         for r in rows:
-            settings = (results.get(str(r["id"])) or {}).get("SETTINGS") or {}
-            ts = settings.get("READ_CONFIRMED") if isinstance(settings, dict) else None
-            if ts:
-                read_at = dt.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
-                storage.update_recipient(r["id"], read_at=read_at)
-    return sum(1 for r in storage.recipients(cid, "sent") if r["read_at"])
+            activity = results.get(str(r["id"]))
+            if not activity:
+                continue  # дело не прочиталось — статус остаётся прежним (или неизвестным)
+            status, read_at = read_status_of(activity)
+            storage.update_recipient(r["id"], read_status=status, read_at=read_at)
+    counts: dict[str, int] = {}
+    for r in storage.recipients(cid, "sent"):
+        key = r["read_status"] or "untracked"
+        counts[key] = counts.get(key, 0) + 1
+    return counts
 
 
 class NotConfirmed(RuntimeError):
@@ -282,13 +305,20 @@ def format_report(storage: Storage, cid: int) -> str:
         f"  из них видно в Timeline: {verified}",
     ]
     sent = [r for r in rows if r["status"] == "sent"]
+    by_read: dict[str, list] = {"read": [], "unread": [], "untracked": []}
+    for r in sent:
+        by_read[r["read_status"] if r["read_status"] in by_read else "untracked"].append(r)
     if c["send_via"] == "bitrix":
-        read = [r for r in sent if r["read_at"]]
-        pct = f" ({round(100 * len(read) / len(sent))}%)" if sent else ""
-        lines += [f"  прочитано:               {len(read)}{pct}",
-                  f"  не прочитано:            {len(sent) - len(read)}"]
+        tracked = len(by_read["read"]) + len(by_read["unread"])
+        pct = f" ({round(100 * len(by_read['read']) / tracked)}% от отслеживаемых)" if tracked else ""
+        lines += [f"  прочитано:               {len(by_read['read'])}{pct}",
+                  f"  не прочитано:            {len(by_read['unread'])}",
+                  f"  нет данных о прочтении:  {len(by_read['untracked'])}"]
+        if by_read["untracked"]:
+            lines.append("    (Битрикс24 не отслеживает открытие писем, созданных через API,"
+                         " — это не значит, что их не прочитали)")
     else:
-        lines.append("  прочитано:               — (письма через SMTP Битрикс24 не отслеживает)")
+        lines.append("  прочитано:               нет данных (письма через SMTP Битрикс24 не отслеживает)")
     lines += [
         f"Ошибки отправки:           {counts.get('failed', 0)}",
         f"Статус неизвестен:         {counts.get('unknown', 0)}",
@@ -300,9 +330,8 @@ def format_report(storage: Storage, cid: int) -> str:
         bc = storage.change_counts(batch["id"])
         lines.append(f"Сделки изменены после отправки: {bc.get('applied', 0)}, ошибки: {bc.get('failed', 0)}"
                      f" (журнал изменений #{batch['id']}, откат: update-undo {batch['id']})")
-    if c["send_via"] == "bitrix" and sent:
-        for title, part in (("Прочитали:", [r for r in sent if r["read_at"]]),
-                            ("Не прочитали:", [r for r in sent if not r["read_at"]])):
+    if c["send_via"] == "bitrix":
+        for title, part in (("Прочитали:", by_read["read"]), ("Не прочитали (открытие отслеживается):", by_read["unread"])):
             if not part:
                 continue
             lines += ["", title]

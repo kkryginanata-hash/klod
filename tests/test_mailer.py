@@ -185,21 +185,28 @@ class SendTest(unittest.TestCase):
         pv = camp_mod.preview(client, st, settings(), campaign(), progress=lambda s: None)
         camp_mod.send(st, pv.campaign_id, BitrixEmailSender(client, "sales@example.com"), confirmed=True,
                       rate_per_minute=0, reports_dir="/tmp/bitrix-mailer-tests", progress=lambda s: None)
-        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id), 0)
-        # получатели открыли два письма — Битрикс24 проставил READ_CONFIRMED
+        # письма через API Битрикс24 не отслеживает: это «нет данных», а не «не прочитано»
+        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id), {"untracked": 73})
+        report = camp_mod.format_report(st, pv.campaign_id)
+        self.assertIn("не прочитано:            0", report)
+        self.assertIn("нет данных о прочтении:  73", report)
+        # одно письмо отслеживается и не открыто, два — открыты
+        fb.activities[1002]["SETTINGS"] = {"EMAIL_META": {}}
         for aid in (1000, 1001):
-            fb.activities[aid]["SETTINGS"] = {**fb.activities[aid]["SETTINGS"], "READ_CONFIRMED": 1790840187}
+            fb.activities[aid]["SETTINGS"] = {"EMAIL_META": {}, "READ_CONFIRMED": 1790840187}
         calls = len(fb.calls)
-        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id), 2)
+        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id),
+                         {"read": 2, "unread": 1, "untracked": 70})
         self.assertNotIn("crm.activity.update", fb.calls[calls:])
         report = camp_mod.format_report(st, pv.campaign_id)
-        self.assertIn("прочитано:               2 (3%)", report)
-        self.assertIn("не прочитано:            71", report)
+        self.assertIn("прочитано:               2 (67% от отслеживаемых)", report)
+        self.assertIn("не прочитано:            1", report)
         self.assertIn("Прочитали:", report)
-        read = [r for r in st.recipients(pv.campaign_id, "sent") if r["read_at"]]
+        read = [r for r in st.recipients(pv.campaign_id, "sent") if r["read_status"] == "read"]
         self.assertEqual({r["activity_id"] for r in read}, {"1000", "1001"})
-        csv_text = camp_mod.export_csv(st, pv.campaign_id, "/tmp/bitrix-mailer-tests").read_text("utf-8-sig")
-        self.assertIn("read_at", csv_text.splitlines()[0])
+        self.assertTrue(all(r["read_at"] for r in read))
+        header = camp_mod.export_csv(st, pv.campaign_id, "/tmp/bitrix-mailer-tests").read_text("utf-8-sig").splitlines()[0]
+        self.assertIn("read_status", header)
 
     def test_interrupted_send_not_repeated(self):
         st = Storage(":memory:")
