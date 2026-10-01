@@ -136,6 +136,7 @@ def _dry_run(settings, storage, cid) -> int:
 
 
 def cmd_report(args, settings, client, storage) -> int:
+    camp_mod.refresh_read_status(client, storage, args.campaign_id)
     print(camp_mod.format_report(storage, args.campaign_id))
     print(f"\nCSV: {camp_mod.export_csv(storage, args.campaign_id, settings.reports_dir)}")
     return 0

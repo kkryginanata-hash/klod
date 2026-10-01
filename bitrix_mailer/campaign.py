@@ -138,13 +138,36 @@ def export_csv(storage: Storage, cid: int, reports_dir: str) -> Path:
     path = Path(reports_dir) / f"campaign-{cid}.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     cols = ["deal_id", "deal_title", "contact_id", "contact_name", "is_primary", "email", "status",
-            "skip_reason", "activity_id", "timeline_verified", "error", "sent_at"]
+            "skip_reason", "activity_id", "timeline_verified", "error", "sent_at", "read_at"]
     with path.open("w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh, delimiter=";")
         w.writerow(cols)
         for r in storage.recipients(cid):
             w.writerow([r[c] for c in cols])
     return path
+
+
+def refresh_read_status(client: BitrixClient, storage: Storage, cid: int) -> int | None:
+    """Подтянуть из Битрикс24, кто открыл письмо.
+
+    Битрикс24 вставляет в письма, отправленные из CRM, пиксель отслеживания; при
+    открытии письма у дела «E-mail» появляется ``SETTINGS.READ_CONFIRMED`` (время
+    открытия, unix). Только чтение (crm.activity.get), в CRM ничего не меняется.
+    Возвращает число прочитанных писем или None, если для кампании статус недоступен
+    (письма ушли через SMTP — их Битрикс24 не отслеживает).
+    """
+    if storage.campaign(cid)["send_via"] != "bitrix":
+        return None
+    rows = [r for r in storage.recipients(cid, "sent") if r["activity_id"] and not r["read_at"]]
+    if rows:
+        results, _errors = client.batch({str(r["id"]): ("crm.activity.get", {"id": r["activity_id"]}) for r in rows})
+        for r in rows:
+            settings = (results.get(str(r["id"])) or {}).get("SETTINGS") or {}
+            ts = settings.get("READ_CONFIRMED") if isinstance(settings, dict) else None
+            if ts:
+                read_at = dt.datetime.fromtimestamp(int(ts)).isoformat(timespec="seconds")
+                storage.update_recipient(r["id"], read_at=read_at)
+    return sum(1 for r in storage.recipients(cid, "sent") if r["read_at"])
 
 
 class NotConfirmed(RuntimeError):
@@ -257,6 +280,16 @@ def format_report(storage: Storage, cid: int) -> str:
         f"Запланировано к отправке:  {s.get('to_send')}",
         f"Отправлено:                {counts.get('sent', 0)}",
         f"  из них видно в Timeline: {verified}",
+    ]
+    sent = [r for r in rows if r["status"] == "sent"]
+    if c["send_via"] == "bitrix":
+        read = [r for r in sent if r["read_at"]]
+        pct = f" ({round(100 * len(read) / len(sent))}%)" if sent else ""
+        lines += [f"  прочитано:               {len(read)}{pct}",
+                  f"  не прочитано:            {len(sent) - len(read)}"]
+    else:
+        lines.append("  прочитано:               — (письма через SMTP Битрикс24 не отслеживает)")
+    lines += [
         f"Ошибки отправки:           {counts.get('failed', 0)}",
         f"Статус неизвестен:         {counts.get('unknown', 0)}",
         f"Ещё в очереди:             {counts.get('queued', 0)}",
@@ -267,6 +300,16 @@ def format_report(storage: Storage, cid: int) -> str:
         bc = storage.change_counts(batch["id"])
         lines.append(f"Сделки изменены после отправки: {bc.get('applied', 0)}, ошибки: {bc.get('failed', 0)}"
                      f" (журнал изменений #{batch['id']}, откат: update-undo {batch['id']})")
+    if c["send_via"] == "bitrix" and sent:
+        for title, part in (("Прочитали:", [r for r in sent if r["read_at"]]),
+                            ("Не прочитали:", [r for r in sent if not r["read_at"]])):
+            if not part:
+                continue
+            lines += ["", title]
+            lines += [f"  сделка #{r['deal_id']} {r['contact_name'] or ''} {r['email']}"
+                      + (f" — {r['read_at'].replace('T', ' ')}" if r["read_at"] else "") for r in part[:50]]
+            if len(part) > 50:
+                lines.append(f"  … и ещё {len(part) - 50} (см. CSV)")
     bad = [r for r in rows if r["status"] in ("failed", "unknown") or (r["status"] == "sent" and not r["timeline_verified"])]
     if bad:
         lines += ["", "Требуют внимания:"]

@@ -179,6 +179,28 @@ class SendTest(unittest.TestCase):
         self.assertEqual(pv2.stats["already_sent"], 73)
         self.assertEqual(pv2.stats["to_send"], 0)
 
+    def test_read_status_from_bitrix(self):
+        fb = cold_portal()
+        client, st = make(fb), Storage(":memory:")
+        pv = camp_mod.preview(client, st, settings(), campaign(), progress=lambda s: None)
+        camp_mod.send(st, pv.campaign_id, BitrixEmailSender(client, "sales@example.com"), confirmed=True,
+                      rate_per_minute=0, reports_dir="/tmp/bitrix-mailer-tests", progress=lambda s: None)
+        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id), 0)
+        # получатели открыли два письма — Битрикс24 проставил READ_CONFIRMED
+        for aid in (1000, 1001):
+            fb.activities[aid]["SETTINGS"] = {**fb.activities[aid]["SETTINGS"], "READ_CONFIRMED": 1790840187}
+        calls = len(fb.calls)
+        self.assertEqual(camp_mod.refresh_read_status(client, st, pv.campaign_id), 2)
+        self.assertNotIn("crm.activity.update", fb.calls[calls:])
+        report = camp_mod.format_report(st, pv.campaign_id)
+        self.assertIn("прочитано:               2 (3%)", report)
+        self.assertIn("не прочитано:            71", report)
+        self.assertIn("Прочитали:", report)
+        read = [r for r in st.recipients(pv.campaign_id, "sent") if r["read_at"]]
+        self.assertEqual({r["activity_id"] for r in read}, {"1000", "1001"})
+        csv_text = camp_mod.export_csv(st, pv.campaign_id, "/tmp/bitrix-mailer-tests").read_text("utf-8-sig")
+        self.assertIn("read_at", csv_text.splitlines()[0])
+
     def test_interrupted_send_not_repeated(self):
         st = Storage(":memory:")
         pv = camp_mod.preview(make(cold_portal()), st, settings(), campaign(), progress=lambda s: None)
