@@ -22,7 +22,8 @@ from . import updates
 
 log = logging.getLogger(__name__)
 
-CONTACT_PLACEHOLDER_FIELDS = {"NAME", "LAST_NAME", "SECOND_NAME", "HONORIFIC", "POST", "COMPANY_ID", "EMAIL", "ID"}
+CONTACT_PLACEHOLDER_FIELDS = {"NAME", "LAST_NAME", "SECOND_NAME", "HONORIFIC", "POST", "COMPANY_ID", "EMAIL", "ID",
+                              "RU_NAME"}  # RU_NAME вычисляется (names.py), в CRM такого поля нет
 
 
 @dataclass

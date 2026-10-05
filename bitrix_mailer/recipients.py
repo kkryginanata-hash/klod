@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import validation
+from .names import ru_first_name
 from .client import BitrixClient
 from .storage import Storage
 
@@ -180,7 +181,7 @@ def collect(
                     continue
                 row["contact_name"] = contact_name(c)
                 email, err = pick_email(c, opts.check_dns)
-                ctx = {"deal": d, "contact": c}
+                ctx = {"deal": d, "contact": {**c, "RU_NAME": ru_first_name(c)}}
             if email is None:
                 s["no_valid_email"] += 1
                 reason = err if opts.contact_mode != "valid_only" else f"исключён (нет валидного email): {err}"

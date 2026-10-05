@@ -236,6 +236,18 @@ class SendTest(unittest.TestCase):
 
 
 class HelpersTest(unittest.TestCase):
+    def test_ru_first_name_and_greeting(self):
+        from bitrix_mailer.names import ru_first_name
+        self.assertEqual(ru_first_name({"NAME": None, "LAST_NAME": "Анна Соколова"}), "Анна")
+        self.assertEqual(ru_first_name({"NAME": "сергей", "LAST_NAME": "Иванов"}), "Сергей")
+        self.assertEqual(ru_first_name({"NAME": "", "LAST_NAME": "Муши Гусейнов"}), "")
+        self.assertEqual(ru_first_name({"NAME": "John", "LAST_NAME": "Smith"}), "")
+        self.assertEqual(ru_first_name({"NAME": "", "LAST_NAME": "Соколова"}), "")
+        tpl = '<p>{{contact.RU_NAME|format:"{}, здравствуйте!"|default:"Здравствуйте!"}}</p>'
+        self.assertEqual(template.render(tpl, {"contact": {"RU_NAME": "Анна"}}, escape=True), "<p>Анна, здравствуйте!</p>")
+        self.assertEqual(template.render(tpl, {"contact": {"RU_NAME": ""}}, escape=True), "<p>Здравствуйте!</p>")
+        self.assertEqual(template.placeholders(tpl), {("contact", "RU_NAME")})
+
     def test_email_validation(self):
         self.assertIsNone(validation.check("Ivan.Petrov+crm@Example.co.uk"))
         self.assertIsNone(validation.check("info@пример.рф"))
