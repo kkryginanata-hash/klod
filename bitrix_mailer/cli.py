@@ -9,6 +9,9 @@
     python -m bitrix_mailer update -w "Воронка=Холодная" -w "Стадия=Свободные" --set "Стадия=В работе"
     python -m bitrix_mailer update-apply 3                   # применить план #3 (спросит подтверждение)
     python -m bitrix_mailer update-undo 3                    # вернуть старые значения
+
+    # аудит контактов (только чтение): компании без почты и телефона
+    python -m bitrix_mailer audit-contacts -w "Воронка=Холодная"
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ from .filters import FilterResolver, conditions_from_mapping, parse_expression
 from .senders import BitrixEmailSender, SmtpSender
 from .storage import Storage
 from .template import render
-from . import updates
+from . import audit, updates
 
 
 def _ask(prompt: str) -> bool:
@@ -235,6 +238,23 @@ def cmd_updates(args, settings, client, storage) -> int:
     return 0
 
 
+def cmd_audit_contacts(args, settings, client, storage) -> int:
+    conds = [parse_expression(w) for w in args.where or []]
+    raw = {}
+    if args.campaign:
+        camp = load_campaign(args.campaign)
+        conds = conditions_from_mapping(camp.filter) + conds
+        raw = camp.raw_filter
+    resolved = FilterResolver(client).resolve(conds, raw)
+    if not resolved.bitrix:
+        raise SystemExit("укажите сделки: -w 'Воронка=Холодная' или --campaign файл")
+    res = audit.run(client, resolved.bitrix, progress=lambda s: print(s, file=sys.stderr))
+    print(audit.format_result(res, args.top))
+    path = Path(settings.reports_dir) / "audit-contacts.csv"
+    print(f"\nПолный список: {audit.export_csv(res, path)}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bitrix_mailer", description="Рассылка по сделкам Битрикс24 с фильтрами")
     p.add_argument("-c", "--config", default="config.toml")
@@ -275,6 +295,10 @@ def main(argv: list[str] | None = None) -> int:
     pn.add_argument("batch_id", type=int)
     pn.add_argument("--yes", action="store_true")
     sub.add_parser("updates", help="журнал изменений сделок")
+    pc = sub.add_parser("audit-contacts", help="компании и контакты без почты и телефона (только чтение)")
+    pc.add_argument("-w", "--where", action="append", help="условие отбора сделок, как в preview")
+    pc.add_argument("--campaign", help="взять фильтр из файла кампании")
+    pc.add_argument("--top", type=int, default=30, help="сколько компаний вывести на экран")
 
     args = p.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.WARNING, format="%(levelname)s %(message)s")
@@ -283,5 +307,6 @@ def main(argv: list[str] | None = None) -> int:
     storage = Storage(settings.db_path)
     handler = {"fields": cmd_fields, "preview": cmd_preview, "send": cmd_send,
                "report": cmd_report, "list": cmd_list, "update": cmd_update,
-               "update-apply": cmd_update_apply, "update-undo": cmd_update_undo, "updates": cmd_updates}[args.cmd]
+               "update-apply": cmd_update_apply, "update-undo": cmd_update_undo, "updates": cmd_updates,
+               "audit-contacts": cmd_audit_contacts}[args.cmd]
     return handler(args, settings, client, storage)

@@ -52,6 +52,8 @@ class FakeBitrix:
         self.deals: list[dict] = []
         self.contacts: dict[int, dict] = {}
         self.links: dict[int, list[dict]] = {}
+        self.companies: dict[int, dict] = {}
+        self.company_links: dict[int, list[dict]] = {}
         self.activities: dict[int, dict] = {}
         self.comments: dict[int, dict] = {}
         self.calls: list[str] = []
@@ -102,6 +104,10 @@ class FakeBitrix:
             return self._list(self.deals, params)
         if method == "crm.contact.list":
             return self._list(list(self.contacts.values()), params)
+        if method == "crm.company.list":
+            return self._list(list(self.companies.values()), params)
+        if method == "crm.company.contact.items.get":
+            return {"result": self.company_links.get(int(params["id"]), [])}
         if method == "crm.deal.contact.items.get":
             return {"result": self.links.get(int(params["id"]), [])}
         if method == "crm.category.list":
