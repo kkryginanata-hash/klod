@@ -129,7 +129,8 @@ def _dry_run(settings, storage, cid) -> int:
         ctx = json.loads(r["context_json"])
         subject = render(c["subject"], ctx, escape=False)
         body = render(c["body_html"], ctx, escape=True)
-        (out / f"deal-{r['deal_id']}-contact-{r['contact_id']}.html").write_text(
+        who = f"contact-{r['contact_id']}" if r["contact_id"] else f"company-{r['company_id']}"
+        (out / f"deal-{r['deal_id']}-{who}.html").write_text(
             f"<!-- To: {r['email']} | Subject: {subject} -->\n{body}", "utf-8")
     print(f"\nDry-run: {len(rows)} писем сохранено в {out}; ничего не отправлено и в CRM не записано.")
     return 0

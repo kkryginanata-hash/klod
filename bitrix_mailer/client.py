@@ -5,8 +5,9 @@
 записи в Timeline существующих сущностей:
 
 * ``crm.activity.add`` — только исходящее письмо (TYPE_ID=4, DIRECTION=2),
-  привязанное к существующей сделке или контакту;
-* ``crm.timeline.comment.add`` — только комментарий к сделке или контакту.
+  привязанное к существующей сделке или контакту; получатель — существующий
+  контакт или компания (по ID, чтобы Битрикс24 не создавал новых сущностей);
+* ``crm.timeline.comment.add`` — только комментарий к сделке, контакту или компании.
 
 Изменение полей существующих сделок (``crm.deal.update``: стадия, ответственный,
 сумма и т.п.) возможно только у клиента, созданного с ``allow_deal_updates=True``.
@@ -40,6 +41,8 @@ READ_METHODS = frozenset(
         "crm.deal.contact.items.get",
         "crm.contact.list",
         "crm.contact.get",
+        "crm.company.list",
+        "crm.company.get",
         "crm.category.list",
         "crm.dealcategory.list",
         "crm.status.list",
@@ -55,6 +58,7 @@ WRITE_METHODS = frozenset({"crm.activity.add", "crm.timeline.comment.add"})
 # Типы сущностей CRM
 ENTITY_DEAL = 2
 ENTITY_CONTACT = 3
+ENTITY_COMPANY = 4
 # crm.activity: TYPE_ID=4 — e-mail, DIRECTION=2 — исходящее
 ACTIVITY_EMAIL = 4
 DIRECTION_OUTGOING = 2
@@ -98,14 +102,14 @@ def check_method_allowed(method: str, params: dict | None = None, allow_deal_upd
         if int(f.get("OWNER_TYPE_ID", 0)) not in (ENTITY_DEAL, ENTITY_CONTACT) or not int(f.get("OWNER_ID", 0)):
             raise CrmWriteForbidden("письмо должно быть привязано к существующей сделке или контакту")
         for c in f.get("COMMUNICATIONS") or []:
-            if int(c.get("ENTITY_TYPE_ID", 0)) != ENTITY_CONTACT or not int(c.get("ENTITY_ID", 0)):
+            if int(c.get("ENTITY_TYPE_ID", 0)) not in (ENTITY_CONTACT, ENTITY_COMPANY) or not int(c.get("ENTITY_ID", 0)):
                 # Без ENTITY_ID Битрикс24 может создать новый контакт/лид по адресу.
-                raise CrmWriteForbidden("получатель письма должен быть существующим контактом (ENTITY_ID)")
+                raise CrmWriteForbidden("получатель письма должен быть существующим контактом или компанией (ENTITY_ID)")
         return
     if method == "crm.timeline.comment.add":
         f = params.get("fields") or {}
-        if str(f.get("ENTITY_TYPE", "")).lower() not in ("deal", "contact") or not int(f.get("ENTITY_ID", 0)):
-            raise CrmWriteForbidden("комментарий допускается только к существующей сделке или контакту")
+        if str(f.get("ENTITY_TYPE", "")).lower() not in ("deal", "contact", "company") or not int(f.get("ENTITY_ID", 0)):
+            raise CrmWriteForbidden("комментарий допускается только к существующей сделке, контакту или компании")
         return
     if method == "crm.deal.update":
         if not allow_deal_updates:

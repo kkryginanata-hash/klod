@@ -1,7 +1,8 @@
 """Персонализация письма.
 
 Плейсхолдеры: ``{{contact.NAME}}``, ``{{deal.TITLE}}``, ``{{deal.UF_CRM_...}}``,
-со значением по умолчанию: ``{{contact.NAME|default:"коллега"}}``.
+со значением по умолчанию: ``{{contact.NAME|default:"коллега"}}``, с обрамлением непустого
+значения: ``{{contact.RU_NAME|format:"{}, здравствуйте!"|default:"Здравствуйте!"}}``.
 В HTML значения экранируются; в теме письма — нет.
 """
 
@@ -10,7 +11,8 @@ from __future__ import annotations
 import html
 import re
 
-PLACEHOLDER = re.compile(r"\{\{\s*(contact|deal)\.([A-Za-z0-9_]+)\s*(?:\|\s*default\s*:\s*\"([^\"]*)\"\s*)?\}\}")
+PLACEHOLDER = re.compile(r"\{\{\s*(contact|deal)\.([A-Za-z0-9_]+)\s*(?:\|\s*format\s*:\s*\"([^\"]*)\"\s*)?"
+                         r"(?:\|\s*default\s*:\s*\"([^\"]*)\"\s*)?\}\}")
 ANY_BRACES = re.compile(r"\{\{.*?\}\}", re.S)
 
 
@@ -38,8 +40,10 @@ def _value(v) -> str:
 
 def render(text: str, context: dict[str, dict], escape: bool) -> str:
     def sub(m: re.Match) -> str:
-        entity, fld, default = m.group(1), m.group(2), m.group(3)
+        entity, fld, fmt, default = m.group(1), m.group(2), m.group(3), m.group(4)
         val = _value((context.get(entity) or {}).get(fld)).strip()
+        if val and fmt:
+            val = fmt.replace("{}", val)
         if not val:
             val = default or ""
         return html.escape(val) if escape else val

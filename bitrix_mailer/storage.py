@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS recipients (
     deal_title        TEXT,
     contact_id        INTEGER,
     contact_name      TEXT,
+    company_id        INTEGER,            -- получатель-компания (у сделки нет контакта)
     is_primary        INTEGER NOT NULL DEFAULT 0,
     email             TEXT,
     status            TEXT NOT NULL,      -- queued | skipped | sending | sent | failed | unknown
@@ -79,6 +80,10 @@ class Storage:
         self.db = sqlite3.connect(str(path))
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        cols = {r["name"] for r in self.db.execute("PRAGMA table_info(recipients)")}
+        if "company_id" not in cols:  # база создана до появления получателей-компаний
+            self.db.execute("ALTER TABLE recipients ADD COLUMN company_id INTEGER")
+            self.db.commit()
 
     # --- кампании ---------------------------------------------------------
     def create_campaign(self, *, key, name, subject, body_html, filter_info, contact_mode, send_via) -> int:
@@ -112,10 +117,10 @@ class Storage:
     # --- получатели -------------------------------------------------------
     def add_recipients(self, campaign_id: int, rows: list[dict]) -> None:
         self.db.executemany(
-            "INSERT INTO recipients(campaign_id,deal_id,deal_title,contact_id,contact_name,is_primary,email,status,"
-            "skip_reason,context_json) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO recipients(campaign_id,deal_id,deal_title,contact_id,contact_name,company_id,is_primary,email,"
+            "status,skip_reason,context_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             [
-                (campaign_id, r["deal_id"], r.get("deal_title"), r.get("contact_id"), r.get("contact_name"),
+                (campaign_id, r["deal_id"], r.get("deal_title"), r.get("contact_id"), r.get("contact_name"), r.get("company_id"),
                  int(bool(r.get("is_primary"))), r.get("email"), r["status"], r.get("skip_reason"),
                  json.dumps(r.get("context") or {}, ensure_ascii=False))
                 for r in rows

@@ -1,7 +1,8 @@
 """Отправка письма и фиксация его в Timeline существующей CRM-сущности.
 
 * ``bitrix`` (по умолчанию) — письмо создаётся как дело «E-mail» (crm.activity.add,
-  TYPE_ID=4, DIRECTION=2) у сделки с получателем-контактом. Битрикс24 сам
+  TYPE_ID=4, DIRECTION=2) у сделки с получателем-контактом (или компанией сделки,
+  если контакта нет). Битрикс24 сам
   отправляет его через подключённый к CRM ящик, и в Timeline сделки и контакта
   появляется настоящее исходящее письмо.
 * ``smtp`` — письмо уходит через ваш SMTP-сервер, а в Timeline сделки (и, по
@@ -20,19 +21,29 @@ from email.headerregistry import Address
 from email.message import EmailMessage
 from email.utils import formataddr, make_msgid
 
-from .client import ACTIVITY_EMAIL, DIRECTION_OUTGOING, ENTITY_CONTACT, ENTITY_DEAL, BitrixClient
+from .client import ACTIVITY_EMAIL, DIRECTION_OUTGOING, ENTITY_COMPANY, ENTITY_CONTACT, ENTITY_DEAL, BitrixClient
 from .template import html_to_text
 
 
 @dataclass
 class Message:
     deal_id: int
-    contact_id: int
+    contact_id: int | None
     contact_name: str
     email: str
     subject: str
     html: str
     responsible_id: int | None = None
+    company_id: int | None = None  # получатель — компания (у сделки нет контакта)
+
+    @property
+    def recipient(self) -> tuple[int, int, str]:
+        """(ENTITY_TYPE_ID, ENTITY_ID, тип для Timeline) получателя."""
+        if self.contact_id:
+            return ENTITY_CONTACT, self.contact_id, "contact"
+        if self.company_id:
+            return ENTITY_COMPANY, self.company_id, "company"
+        raise ValueError(f"сделка #{self.deal_id}: у получателя нет ни контакта, ни компании")
 
 
 @dataclass
@@ -60,7 +71,7 @@ class BitrixEmailSender:
             "DESCRIPTION": m.html,
             "DESCRIPTION_TYPE": 3,  # HTML
             "COMPLETED": "Y",
-            "COMMUNICATIONS": [{"VALUE": m.email, "ENTITY_ID": m.contact_id, "ENTITY_TYPE_ID": ENTITY_CONTACT}],
+            "COMMUNICATIONS": [{"VALUE": m.email, "ENTITY_ID": m.recipient[1], "ENTITY_TYPE_ID": m.recipient[0]}],
             "SETTINGS": {"MESSAGE_FROM": self.from_address},
         }
         responsible = self.responsible_id or m.responsible_id
@@ -70,7 +81,7 @@ class BitrixEmailSender:
         return SendResult(activity_id, *self.verify(activity_id, m))
 
     def verify(self, activity_id: str, m: Message) -> tuple[bool, str]:
-        """Письмо есть в Timeline сделки как исходящее и адресовано нужному контакту."""
+        """Письмо есть в Timeline сделки как исходящее и адресовано нужному контакту/компании."""
         a = self.client.call("crm.activity.get", {"id": activity_id}) or {}
         problems = []
         if str(a.get("TYPE_ID")) != str(ACTIVITY_EMAIL):
@@ -80,8 +91,10 @@ class BitrixEmailSender:
         if str(a.get("OWNER_TYPE_ID")) != str(ENTITY_DEAL) or str(a.get("OWNER_ID")) != str(m.deal_id):
             problems.append(f"привязано к {a.get('OWNER_TYPE_ID')}:{a.get('OWNER_ID')}")
         comms = a.get("COMMUNICATIONS") or []
-        if comms and not any(str(c.get("ENTITY_ID")) == str(m.contact_id) for c in comms):
-            problems.append("получатель не совпадает с контактом")
+        etype, eid, _ = m.recipient
+        if comms and not any(str(c.get("ENTITY_ID")) == str(eid) and str(c.get("ENTITY_TYPE_ID", etype)) == str(etype)
+                             for c in comms):
+            problems.append("получатель не совпадает с контактом/компанией")
         return (not problems, "; ".join(problems))
 
 
@@ -127,7 +140,10 @@ class SmtpSender:
         msg["Subject"] = m.subject
         msg["Message-ID"] = make_msgid(domain=Address(addr_spec=self.from_address).domain)
         msg["X-CRM-Deal-ID"] = str(m.deal_id)
-        msg["X-CRM-Contact-ID"] = str(m.contact_id)
+        if m.contact_id:
+            msg["X-CRM-Contact-ID"] = str(m.contact_id)
+        else:
+            msg["X-CRM-Company-ID"] = str(m.company_id)
         if self.reply_to:
             msg["Reply-To"] = self.reply_to
         msg.set_content(html_to_text(m.html))
@@ -145,8 +161,9 @@ class SmtpSender:
         cid = str(self.client.call("crm.timeline.comment.add",
                                    {"fields": {"ENTITY_TYPE": "deal", "ENTITY_ID": m.deal_id, "COMMENT": comment}}))
         if self.log_to_contact:
+            _, eid, etype = m.recipient
             self.client.call("crm.timeline.comment.add",
-                             {"fields": {"ENTITY_TYPE": "contact", "ENTITY_ID": m.contact_id, "COMMENT": comment}})
+                             {"fields": {"ENTITY_TYPE": etype, "ENTITY_ID": eid, "COMMENT": comment}})
         got = self.client.call("crm.timeline.comment.get", {"id": cid}) or {}
         ok = str(got.get("ENTITY_ID")) == str(m.deal_id)
         return SendResult(cid, ok, "" if ok else "комментарий не найден в Timeline сделки")
